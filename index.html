@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>School Royale — Deck Builder Edition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin:0; padding:0; background:#0e1220; color:#e9ecff; font-family: system-ui, Arial, sans-serif; }
+    #wrap { display:flex; flex-direction:column; height:100vh; }
+    #topbar {
+      display:flex; align-items:center; gap:10px; padding:8px 12px;
+      background:linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.6)); border-bottom:1px solid #1d2442;
+    }
+    .stat { padding:4px 8px; background:#141a33; border:1px solid #27315c; border-radius:6px; font-weight:700; }
+    #cards, #builder { display:flex; gap:8px; align-items:center; }
+    #cards { margin-left:auto; }
+    .card, .pick {
+      min-width:92px; height:60px; border-radius:8px; border:2px solid #4c5bd4;
+      background:#141a33; display:flex; flex-direction:column; align-items:center; justify-content:center;
+      cursor:pointer; user-select:none; transition:transform .05s ease, border-color .15s ease, background .15s ease;
+      padding:4px 6px; text-align:center;
+    }
+    .card:active, .pick:active { transform:scale(0.98); }
+    .pick.selected { border-color:#45f08a; background:#112023; }
+    .card.disabled { opacity:.5; pointer-events:none; }
+    .cost { font-size:12px; opacity:.85; }
+    #game { flex:1; display:flex; align-items:center; justify-content:center; }
+    canvas { background:#0a0f1e; border:1px solid #1d2442; box-shadow:0 0 0 2px #0a0f1e, 0 0 20px rgba(0,0,0,0.4); }
+    #tip { text-align:center; padding:6px; font-size:12px; color:#aab3ff; }
+    #builderWrap {
+      padding:10px; display:flex; flex-direction:column; gap:10px;
+      background:linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.15));
+      border-bottom:1px solid #1d2442;
+    }
+    #pool { display:grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap:8px; }
+    .pill {
+      display:inline-flex; gap:6px; align-items:center; padding:4px 8px; border-radius:20px;
+      background:#141a33; border:1px solid #27315c; font-size:12px;
+    }
+    button {
+      background:#4c5bd4; border:none; color:#fff; padding:8px 12px; border-radius:8px; font-weight:700; cursor:pointer;
+    }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    #handTitle { font-size:12px; opacity:.8; margin-right:6px; }
+    #status { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40vw; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="topbar">
+      <div class="stat" id="elixir">Elixir: 5.0 / 10</div>
+      <div class="stat" id="status">Pick 8 cards to build your deck.</div>
+      <div id="cards"><span id="handTitle" style="display:none;">Hand:</span></div>
+    </div>
+
+    <div id="builderWrap">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <div class="pill"><strong>Deck:</strong> <span id="selCount" style="margin-left:6px;">0 / 8</span></div>
+        <div id="builder" style="gap:8px;">
+          <button id="random8">Random 8</button>
+          <button id="clearDeck">Clear</button>
+          <button id="startBattle" disabled>Start Battle</button>
+        </div>
+      </div>
+      <div id="pool"></div>
+    </div>
+
+    <div id="game"><canvas id="c" width="1024" height="576"></canvas></div>
+    <div id="tip">Build your deck, start the battle, click a card, then click your half near a lane. Destroy the enemy king tower to win.</div>
+  </div>
+
+  <script>
+  // Single-file “Clash-like” battler with a deck builder. No libraries needed.
+  (() => {
+    const W = 1024, H = 576;
+    const FIELD = { left: 64, right: W - 64, top: 80, bottom: H - 80 };
+    const LANES = [H * 0.35, H * 0.65];
+    const ctx = document.getElementById('c').getContext('2d');
+
+    const elixirEl = document.getElementById('elixir');
+    const statusEl = document.getElementById('status');
+    const cardsEl = document.getElementById('cards');
+    const handTitle = document.getElementById('handTitle');
+
+    // Deck builder DOM
+    const poolEl = document.getElementById('pool');
+    const selCountEl = document.getElementById('selCount');
+    const startBtn = document.getElementById('startBattle');
+    const randomBtn = document.getElementById('random8');
+    const clearBtn = document.getElementById('clearDeck');
+    const builderWrap = document.getElementById('builderWrap');
+
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const dist = (a,b,x,y)=>Math.hypot(a-x,b-y);
+    const rnd = (a,b)=>a + Math.random()*(b-a);
+
+    const HOME = 'home';
+    const AWAY = 'away';
+
+    // 20 cards pool (troops, ranged, tanks, swarms, spells)
+    const CARD_POOL = [
+      // Troops
+      C_melee('Swordsman', 3, 360, 70, 28, 60, 1.0, 12, '#5fd2ff'),
+      C_melee('Knight', 3, 420, 65, 28, 65, 1.0, 12, '#5fafff'),
+      C_melee('Berserker', 4, 380, 80, 28, 85, 1.1, 12, '#ff8c69'),
+      C_melee('Assassin', 3, 260, 95, 22, 120, 1.3, 10, '#ffc07a'),
+      C_melee('Valkyrie', 4, 560, 60, 32, 70, 0.9, 13, '#ff9eb6'),
+      // Ranged
+      C_ranged('Archer', 3, 240, 60, 150, 45, 1.1, 10, '#9ee37d'),
+      C_ranged('Musketeer', 4, 300, 55, 170, 70, 0.9, 10, '#b28dff'),
+      C_ranged('Hunter', 4, 380, 50, 140, 90, 0.8, 11, '#8fd1ff'),
+      C_ranged('Wizard', 5, 320, 55, 160, 55, 1.2, 11, '#66e1ff'),
+      C_ranged('Ice Mage', 4, 300, 55, 160, 40, 1.2, 11, '#b3f0ff'),
+      // Tanks
+      C_tank('Guardian', 5, 900, 45, 28, 95, 0.7, 14, '#ffb84c'),
+      C_tank('Golem', 8, 1600, 35, 28, 110, 0.6, 16, '#8888ff'),
+      C_tank('Colossus', 7, 1400, 38, 28, 100, 0.65, 15, '#d6a86e'),
+      C_tank('Warden', 6, 1100, 42, 28, 85, 0.75, 15, '#8cb6ff'),
+      // Swarms
+      C_swarm('Goblins (3)', 2, 3, 120, 90, 24, 25, 1.3, 8, '#f97b7b'),
+      C_swarm('Skeletons (4)', 1, 4, 100, 95, 20, 20, 1.4, 7, '#cccccc'),
+      C_swarm('Bats (5)', 2, 5, 80, 110, 26, 18, 1.5, 6, '#c48bff'),
+      C_swarm('Minions (3)', 3, 3, 150, 85, 28, 30, 1.2, 9, '#6fd0ff'),
+      // Spells
+      C_spell('Fireball', 4, 80, 220, '#ff4d4d'),
+      C_spell('Zap', 2, 60, 120, '#cfe7ff'),
+    ];
+
+    // Card builders
+    function C_melee(name, cost, hp, spd, rng, dps, atkSpd, r, color) {
+      return { id:idify(name), name, cost, type:'melee', unit:{ hp, spd, rng, dps, atkSpd, r, color } };
+    }
+    function C_ranged(name, cost, hp, spd, rng, dps, atkSpd, r, color) {
+      return { id:idify(name), name, cost, type:'ranged', unit:{ hp, spd, rng, dps, atkSpd, r, color } };
+    }
+    function C_tank(name, cost, hp, spd, rng, dps, atkSpd, r, color) {
+      return { id:idify(name), name, cost, type:'tank', unit:{ hp, spd, rng, dps, atkSpd, r, color } };
+    }
+    function C_swarm(name, cost, count, hp, spd, rng, dps, atkSpd, r, color) {
+      return { id:idify(name), name, cost, type:'swarm', count, unit:{ hp, spd, rng, dps, atkSpd, r, color } };
+    }
+    function C_spell(name, cost, radius, damage, color) {
+      return { id:idify(name), name, cost, type:'spell', spell:{ radius, damage, color } };
+    }
+    function idify(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
+
+    // Game state
+    const state = {
+      time: 0, lastFrame: performance.now(),
+      units: [],
+      towers: [],
+      elixir: 5, elixirMax: 10,
+      running: false,
+      selectedCard: null,
+      myDeck: [],
+      aiDeck: []
+    };
+
+    // Deck builder logic
+    let selected = [];
+    renderPool();
+
+    randomBtn.onclick = () => {
+      selected = [];
+      const copy = CARD_POOL.slice();
+      while (selected.length < 8 && copy.length) {
+        const i = Math.floor(Math.random()*copy.length);
+        selected.push(copy.splice(i,1)[0]);
+      }
+      renderPool();
+    };
+    clearBtn.onclick = () => { selected = []; renderPool(); };
+    startBtn.onclick = () => {
+      if (selected.length !== 8) return;
+      state.myDeck = selected.slice();
+      state.aiDeck = pickRandom(CARD_POOL, 8);
+      builderWrap.style.display = 'none';
+      handTitle.style.display = 'inline';
+      buildHandUI(state.myDeck);
+      startBattle();
+    };
+
+    function renderPool() {
+      poolEl.innerHTML = '';
+      selCountEl.textContent = `${selected.length} / 8`;
+      startBtn.disabled = selected.length !== 8;
+      CARD_POOL.forEach(card => {
+        const el = document.createElement('div');
+        el.className = 'pick' + (selected.includes(card) ? ' selected' : '');
+        el.innerHTML = `
+          <div style="font-weight:700">${card.name}</div>
+          <div class="cost">Cost: ${card.cost} — ${kindString(card)}</div>
+        `;
+        el.onclick = () => {
+          if (selected.includes(card)) {
+            selected = selected.filter(c => c !== card);
+          } else {
+            if (selected.length < 8) selected.push(card);
+          }
+          renderPool();
+        };
+        poolEl.appendChild(el);
+      });
+    }
+
+    function kindString(card) {
+      if (card.type === 'spell') return 'Spell';
+      if (card.type === 'swarm') return `Swarm x${card.count}`;
+      if (card.type === 'ranged') return 'Ranged';
+      if (card.type === 'tank') return 'Tank';
+      return 'Troop';
+    }
+
+    function pickRandom(arr, n) {
+      const copy = arr.slice();
+      const out = [];
+      while (out.length < n && copy.length) {
+        const i = Math.floor(Math.random()*copy.length);
+        out.push(copy.splice(i,1)[0]);
+      }
+      return out;
+    }
+
+    // Build in-game hand UI from chosen deck
+    function buildHandUI(deck) {
+      cardsEl.innerHTML = '<span id="handTitle" style="opacity:.8;font-size:12px;margin-right:6px;">Hand:</span>';
+      deck.forEach(card => {
+        const div = document.createElement('div');
+        div.className = 'card';
+        div.innerHTML = `<div style="font-weight:700">${card.name}</div><div class="cost">Cost: ${card.cost}</div>`;
+        div.onclick = () => {
+          if (card.type !== 'spell' && state.elixir + 1e-9 < card.cost) {
+            flashStatus('Not enough elixir.');
+          } else {
+            state.selectedCard = card;
+            flashStatus(`Selected: ${card.name}. Click your half to place.`);
+          }
+        };
+        cardsEl.appendChild(div);
+      });
+    }
+
+    // Towers
+    function addTowers() {
+      state.towers.length = 0;
+      state.towers.push(makeTower(FIELD.left + 120, H/2, HOME, true));
+      state.towers.push(makeTower(FIELD.right - 120, H/2, AWAY, true));
+      for (const y of LANES) {
+        state.towers.push(makeTower(FIELD.left + 70, y, HOME, false));
+        state.towers.push(makeTower(FIELD.right - 70, y, AWAY, false));
+      }
+    }
+
+    function makeTower(x,y,side,king) {
+      const hp = king ? 2600 : 1400;
+      return {
+        x,y, side, king,
+        hp, maxHp: hp,
+        rng: king ? 220 : 170,
+        dps: king ? 80 : 55,
+        atkSpd: king ? 0.8 : 1.0,
+        lastAtk: 0,
+        w: king ? 46 : 36,
+        h: king ? 66 : 56
+      };
+    }
+
+    // Units
+    function spawnUnit(side, x, y, stats) {
+      const u = {
+        side, x, y,
+        hp: stats.hp, maxHp: stats.hp,
+        spd: stats.spd, rng: stats.rng, dps: stats.dps,
+        atkSpd: stats.atkSpd, lastAtk: 0, r: stats.r, color: stats.color
+      };
+      state.units.push(u);
+    }
+
+    // Spells
+    function castSpell(card, x, y, side) {
+      if (state.elixir + 1e-9 < card.cost) return false;
+      state.elixir = Math.max(0, state.elixir - card.cost);
+      const { radius, damage, color } = card.spell;
+      // Damage enemy units and towers in area
+      const enemiesU = state.units.filter(u => u.side !== side);
+      for (const e of enemiesU) {
+        const d = dist(x,y,e.x,e.y);
+        if (d <= radius) e.hp = Math.max(0, e.hp - damage);
+      }
+      for (const t of state.towers.filter(t => t.side !== side)) {
+        const d = dist(x,y,t.x,t.y);
+        if (d <= radius) t.hp = Math.max(0, t.hp - damage * 0.6); // reduced vs towers
+      }
+      // Visual flash
+      spellBursts.push({ x, y, r: radius, color, t: state.time, life: 400 });
+      flashStatus(`${side===HOME?'You':'AI'} cast ${card.name} (-${card.cost})`);
+      return true;
+    }
+
+    const spellBursts = []; // {x,y,r,color,t,life}
+
+    // Input to place cards
+    document.getElementById('c').addEventListener('click', (e) => {
+      if (!state.running) return;
+      if (!state.selectedCard) { flashStatus('Select a card first.'); return; }
+      const rect = e.target.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (W / rect.width);
+      const y = (e.clientY - rect.top) * (H / rect.height);
+
+      const myHalfRight = (FIELD.left + FIELD.right)/2;
+      if (x > myHalfRight) { flashStatus('Place on your half only.'); return; }
+
+      const card = state.selectedCard;
+      if (card.type === 'spell') {
+        if (castSpell(card, x, y, HOME)) state.selectedCard = null;
+        return;
+      }
+
+      if (state.elixir + 1e-9 < card.cost) { flashStatus('Not enough elixir.'); return; }
+      const laneY = Math.abs(y - LANES[1]) < Math.abs(y - LANES[0]) ? LANES[1] : LANES[0];
+      playCard(card, clamp(x, FIELD.left+100, FIELD.right-100), laneY + rnd(-10,10), HOME);
+      state.selectedCard = null;
+    });
+
+    // Playing a non-spell card
+    function playCard(card, x, y, side) {
+      state.elixir = Math.max(0, state.elixir - card.cost);
+      const n = card.count || 1;
+      const spread = 16;
+      for (let i=0; i<n; i++) {
+        spawnUnit(side,
+          x + (n>1 ? (i-(n-1)/2) * spread : 0),
+          y + rnd(-8,8),
+          card.unit
+        );
+      }
+      flashStatus(`${side===HOME?'You':'AI'} played ${card.name} (-${card.cost})`);
+      return true;
+    }
+
+    // AI
+    const AI = {
+      nextPlay: 1800,
+      update(t) {
+        if (!state.running) return;
+        if (t >= this.nextPlay) {
+          // Prefer cheaper cards if low on elixir, randomly include spells
+          const playable = state.aiDeck.filter(c => state.elixir >= c.cost - 0.1);
+          if (playable.length) {
+            // Light bias toward troops when few enemy units exist
+            const troopish = playable.filter(c => c.type !== 'spell');
+            const pickFrom = (Math.random() < 0.7 && troopish.length) ? troopish : playable;
+            const card = pickFrom[Math.floor(Math.random()*pickFrom.length)];
+            const lane = Math.random() < 0.5 ? 0 : 1;
+            const lx = FIELD.right - 200;
+            const ly = LANES[lane] + rnd(-12,12);
+            if (card.type === 'spell') {
+              // Aim near closest enemy on our side
+              const target = closestEnemyToPoint(AWAY, lx, ly) || { x: (FIELD.left+FIELD.right)/2, y: LANES[lane] };
+              castSpell(card, target.x, target.y, AWAY);
+            } else {
+              playCard(card, lx, ly, AWAY);
+            }
+          }
+          this.nextPlay = t + 1400 + Math.random()*1800;
+        }
+      }
+    };
+
+    function closestEnemyToPoint(side, x, y) {
+      const enemies = state.units.filter(u => u.side !== side);
+      let best=null, bestD=Infinity;
+      for (const e of enemies) {
+        const d = dist(x,y,e.x,e.y);
+        if (d < bestD) { best=e; bestD=d; }
+      }
+      return best;
+    }
+
+    // HUD
+    function flashStatus(text) { statusEl.textContent = text; }
+
+    // Draw
+    function drawField() {
+      ctx.strokeStyle = '#223057';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(FIELD.left, FIELD.top, FIELD.right - FIELD.left, FIELD.bottom - FIELD.top);
+      ctx.fillStyle = 'rgba(22, 30, 66, 0.25)';
+      ctx.fillRect((FIELD.left+FIELD.right)/2, FIELD.top, (FIELD.right-FIELD.left)/2, FIELD.bottom - FIELD.top);
+      ctx.fillStyle = '#2b3b72';
+      for (const y of LANES) ctx.fillRect(FIELD.left, y-2, FIELD.right-FIELD.left, 4);
+    }
+
+    function drawTower(t) {
+      ctx.fillStyle = t.side===HOME ? '#2d9bf0' : '#f0682d';
+      ctx.fillRect(t.x - t.w/2, t.y - t.h/2, t.w, t.h);
+      const p = clamp(t.hp/t.maxHp,0,1);
+      ctx.fillStyle = '#0b0f22'; ctx.fillRect(t.x - 28, t.y - t.h/2 - 10, 56, 6);
+      ctx.fillStyle = p>0.5 ? '#45f08a' : (p>0.2 ? '#ffd24c' : '#ff5c5c');
+      ctx.fillRect(t.x - 28, t.y - t.h/2 - 10, 56*p, 6);
+    }
+
+    function drawUnit(u) {
+      ctx.beginPath(); ctx.fillStyle = u.color; ctx.arc(u.x, u.y, u.r, 0, Math.PI*2); ctx.fill();
+      const p = clamp(u.hp/u.maxHp,0,1);
+      ctx.fillStyle = '#0b0f22'; ctx.fillRect(u.x - 14, u.y - u.r - 10, 28, 4);
+      ctx.fillStyle = p>0.5 ? '#45f08a' : (p>0.2 ? '#ffd24c' : '#ff5c5c');
+      ctx.fillRect(u.x - 14, u.y - u.r - 10, 28*p, 4);
+    }
+
+    function drawSpells(now) {
+      for (const s of spellBursts) {
+        const age = now - s.t;
+        const k = clamp(1 - age / s.life, 0, 1);
+        if (k <= 0) continue;
+        ctx.beginPath();
+        ctx.strokeStyle = s.color;
+        ctx.globalAlpha = k * 0.8;
+        ctx.lineWidth = 3;
+        ctx.arc(s.x, s.y, s.r*(1.0 + 0.05*(1-k)), 0, Math.PI*2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      // Cleanup old
+      for (let i=spellBursts.length-1; i>=0; i--) {
+        if (state.time - spellBursts[i].t > spellBursts[i].life) spellBursts.splice(i,1);
+      }
+    }
+
+    // Battle loop components
+    function startBattle() {
+      state.running = true;
+      state.elixir = 5;
+      addTowers();
+      flashStatus('Battle started! Select a card and click your half to place.');
+      requestAnimationFrame((t)=>{ state.lastFrame = t; loop(t); });
+    }
+
+    function step(now, dt) {
+      state.elixir = clamp(state.elixir + dt * 0.5, 0, state.elixirMax);
+      elixirEl.textContent = `Elixir: ${state.elixir.toFixed(1)} / ${state.elixirMax}`;
+
+      // Units: move and attack
+      for (const u of state.units) {
+        const dir = u.side===HOME ? 1 : -1;
+        const target = findTarget(u);
+        if (target && inRange(u, target)) {
+          if (now - u.lastAtk >= 1000 / u.atkSpd) {
+            u.lastAtk = now;
+            applyDamage(target, u.dps);
+          }
+        } else {
+          u.x += dir * u.spd * dt;
+        }
+      }
+
+      // Towers: attack nearest
+      for (const tw of state.towers) {
+        const enemies = state.units.filter(u => u.side !== tw.side);
+        let best = null, bestD = Infinity;
+        for (const e of enemies) {
+          const d = dist(tw.x, tw.y, e.x, e.y);
+          if (d < tw.rng && d < bestD) { best = e; bestD = d; }
+        }
+        if (best && (now - tw.lastAtk >= 1000 / tw.atkSpd)) {
+          tw.lastAtk = now;
+          applyDamage(best, tw.dps);
+        }
+      }
+
+      // Cleanup dead and off-field
+      state.units = state.units.filter(u => u.hp > 0 && u.x > FIELD.left-40 && u.x < FIELD.right+40);
+      state.towers = state.towers.filter(tw => tw.hp > 0);
+
+      // Win/Lose
+      const homeKingAlive = state.towers.some(tw => tw.side===HOME && tw.king);
+      const awayKingAlive = state.towers.some(tw => tw.side===AWAY && tw.king);
+      if (!homeKingAlive || !awayKingAlive) {
+        state.running = false;
+        flashStatus(awayKingAlive ? 'You Lose!' : 'You Win!');
+      }
+    }
+
+    function findTarget(u) {
+      const enemies = [
+        ...state.units.filter(e => e.side !== u.side),
+        ...state.towers.filter(tw => tw.side !== u.side)
+      ];
+      let best=null, bestD=Infinity;
+      for (const e of enemies) {
+        const d = dist(u.x,u.y,e.x,e.y);
+        if (d < bestD) { best=e; bestD=d; }
+      }
+      return best;
+    }
+    function inRange(att, target) { return dist(att.x,att.y,target.x,target.y) <= att.rng; }
+    function applyDamage(target, dmg) { target.hp = Math.max(0, target.hp - dmg); }
+
+    function loop(now) {
+      const dt = Math.min(0.05, (now - state.lastFrame) / 1000);
+      state.lastFrame = now;
+      state.time = now;
+
+      if (state.running) {
+        step(now, dt);
+        AI.update(now);
+      }
+
+      ctx.clearRect(0,0,W,H);
+      drawField();
+      state.towers.forEach(drawTower);
+      state.units.forEach(drawUnit);
+      drawSpells(now);
+
+      requestAnimationFrame(loop);
+    }
+  })();
+  </script>
+</body>
+</html>
